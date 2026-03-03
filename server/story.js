@@ -88,33 +88,36 @@ async function generateStory(params, onChunk) {
     throw new Error(`LLM API 错误 (${response.status}): ${err}`)
   }
 
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
+  return new Promise((resolve, reject) => {
+    let buffer = ''
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
+    response.body.on('data', (chunk) => {
+      buffer += chunk.toString()
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
 
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() || ''
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed || !trimmed.startsWith('data: ')) continue
+        const data = trimmed.slice(6)
+        if (data === '[DONE]') {
+          resolve()
+          return
+        }
 
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (!trimmed || !trimmed.startsWith('data: ')) continue
-      const data = trimmed.slice(6)
-      if (data === '[DONE]') return
-
-      try {
-        const json = JSON.parse(data)
-        const content = json.choices && json.choices[0] && json.choices[0].delta && json.choices[0].delta.content
-        if (content) onChunk(content)
-      } catch (e) {
-        // skip malformed JSON
+        try {
+          const json = JSON.parse(data)
+          const content = json.choices && json.choices[0] && json.choices[0].delta && json.choices[0].delta.content
+          if (content) onChunk(content)
+        } catch (e) {
+          // skip malformed JSON
+        }
       }
-    }
-  }
+    })
+
+    response.body.on('end', () => resolve())
+    response.body.on('error', (err) => reject(err))
+  })
 }
 
 module.exports = { generateStory }
