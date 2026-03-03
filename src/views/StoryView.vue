@@ -172,11 +172,17 @@ async function toggleSpeech() {
 
     abortController = new AbortController()
 
+    // 组合文本：标题 + 停顿 + 正文
+    // 用省略号和换行制造自然停顿
+    const ttsText = `${props.story.title}。。。
+
+${props.story.content}`
+
     const res = await fetch('/api/tts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        text: props.story.content,
+        text: ttsText,
         voice: selectedVoice.value
       }),
       signal: abortController.signal
