@@ -164,7 +164,7 @@ async function toggleSpeech() {
     return
   }
 
-  // 流式生成 + 播放
+  // 生成音频并播放
   loading.value = true
   try {
     // 清理旧音频
@@ -173,7 +173,6 @@ async function toggleSpeech() {
     abortController = new AbortController()
 
     // 组合文本：标题 + 停顿 + 正文
-    // 用省略号和换行制造自然停顿
     const ttsText = `${props.story.title}。。。
 
 ${props.story.content}`
@@ -193,77 +192,114 @@ ${props.story.content}`
       throw new Error(err.error || '语音合成失败')
     }
 
-    // 使用 MediaSource 实现边下边播
-    const mediaSource = new MediaSource()
-    const url = URL.createObjectURL(mediaSource)
-    audio = new Audio(url)
+    // 检测是否支持 MediaSource（iOS Safari 不支持）
+    const supportsMediaSource = typeof MediaSource !== 'undefined' && 
+      MediaSource.isTypeSupported && 
+      MediaSource.isTypeSupported('audio/mpeg')
 
-    mediaSource.addEventListener('sourceopen', async () => {
-      const sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg')
-      const reader = res.body.getReader()
-
-      // 收到第一块数据后就开始播放
-      let firstChunk = true
-
-      async function pump() {
-        const { done, value } = await reader.read()
-        if (done) {
-          // 等待 sourceBuffer 更新完毕后关闭
-          if (sourceBuffer.updating) {
-            sourceBuffer.addEventListener('updateend', () => {
-              if (mediaSource.readyState === 'open') mediaSource.endOfStream()
-            }, { once: true })
-          } else {
-            if (mediaSource.readyState === 'open') mediaSource.endOfStream()
-          }
-          return
-        }
-
-        // 追加音频数据
-        if (sourceBuffer.updating) {
-          await new Promise(r => sourceBuffer.addEventListener('updateend', r, { once: true }))
-        }
-        sourceBuffer.appendBuffer(value)
-
-        if (firstChunk) {
-          firstChunk = false
-          loading.value = false
-          await audio.play()
-          isPlaying.value = true
-          updateProgress()
-        }
-
-        // 等待追加完成后继续读取
-        if (sourceBuffer.updating) {
-          await new Promise(r => sourceBuffer.addEventListener('updateend', r, { once: true }))
-        }
-        await pump()
-      }
-
-      await pump()
-    })
-
-    audio.addEventListener('loadedmetadata', () => {
-      duration.value = audio.duration
-      audioReady.value = true
-    })
-    // duration 在流式模式下可能是 Infinity，需要在 endOfStream 后更新
-    audio.addEventListener('durationchange', () => {
-      if (isFinite(audio.duration)) {
-        duration.value = audio.duration
-        audioReady.value = true
-      }
-    })
-    audio.addEventListener('ended', () => {
-      isPlaying.value = false
-      currentTime.value = 0
-    })
+    if (supportsMediaSource) {
+      // 支持 MediaSource：边下边播
+      await playWithMediaSource(res)
+    } else {
+      // 不支持：下载完整音频后播放
+      await playWithBlob(res)
+    }
   } catch (err) {
     if (err.name === 'AbortError') return  // 切换音色导致的中断，忽略
     alert('语音合成失败：' + err.message)
   } finally {
     loading.value = false
   }
+}
+
+// 使用 MediaSource 边下边播（Chrome/Firefox/Edge）
+async function playWithMediaSource(res) {
+  const mediaSource = new MediaSource()
+  const url = URL.createObjectURL(mediaSource)
+  audio = new Audio(url)
+
+  mediaSource.addEventListener('sourceopen', async () => {
+    const sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg')
+    const reader = res.body.getReader()
+    let firstChunk = true
+
+    async function pump() {
+      const { done, value } = await reader.read()
+      if (done) {
+        if (sourceBuffer.updating) {
+          sourceBuffer.addEventListener('updateend', () => {
+            if (mediaSource.readyState === 'open') mediaSource.endOfStream()
+          }, { once: true })
+        } else {
+          if (mediaSource.readyState === 'open') mediaSource.endOfStream()
+        }
+        return
+      }
+
+      if (sourceBuffer.updating) {
+        await new Promise(r => sourceBuffer.addEventListener('updateend', r, { once: true }))
+      }
+      sourceBuffer.appendBuffer(value)
+
+      if (firstChunk) {
+        firstChunk = false
+        loading.value = false
+        await audio.play()
+        isPlaying.value = true
+        updateProgress()
+      }
+
+      if (sourceBuffer.updating) {
+        await new Promise(r => sourceBuffer.addEventListener('updateend', r, { once: true }))
+      }
+      await pump()
+    }
+
+    await pump()
+  })
+
+  audio.addEventListener('loadedmetadata', () => {
+    duration.value = audio.duration
+    audioReady.value = true
+  })
+  audio.addEventListener('durationchange', () => {
+    if (isFinite(audio.duration)) {
+      duration.value = audio.duration
+      audioReady.value = true
+    }
+  })
+  audio.addEventListener('ended', () => {
+    isPlaying.value = false
+    currentTime.value = 0
+  })
+}
+
+// 下载完整音频后播放（iOS Safari）
+async function playWithBlob(res) {
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  audio = new Audio(url)
+
+  audio.addEventListener('loadedmetadata', () => {
+    duration.value = audio.duration
+    audioReady.value = true
+  })
+  audio.addEventListener('canplaythrough', async () => {
+    loading.value = false
+    try {
+      await audio.play()
+      isPlaying.value = true
+      updateProgress()
+    } catch (e) {
+      console.warn('自动播放失败，请点击播放按钮', e)
+    }
+  }, { once: true })
+  audio.addEventListener('ended', () => {
+    isPlaying.value = false
+    currentTime.value = 0
+  })
+
+  audio.load()
 }
 
 function handleSave() {
